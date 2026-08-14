@@ -1,3 +1,4 @@
+from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig
 import yaml
 from pathlib import Path
 from typing import Dict, Any
@@ -9,7 +10,6 @@ from lerobot.processor import make_default_processors
 from lerobot.utils.visualization_utils import init_rerun
 from lerobot.utils.control_utils import init_keyboard_listener
 from send2trash import send2trash
-import termios
 import sys
 import time as time_module
 from lerobot.utils.constants import HF_LEROBOT_HOME
@@ -17,6 +17,22 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.utils import hw_to_dataset_features
 from lerobot.utils.control_utils import sanity_check_dataset_robot_compatibility
 import logging
+
+import sys
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import termios
+
+
+def flush_stdin() -> None:
+    """Discard any pending keystrokes before reading fresh input."""
+    if sys.platform == "win32":
+        while msvcrt.kbhit():
+            msvcrt.getch()
+    else:
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -154,36 +170,61 @@ def make_camera_configs(record_cfg: RecordConfig) -> dict:
             "Both camera serial numbers are required when cameras.enabled is true."
         )
 
-    # Import RealSense only when real cameras are enabled.
+    # # Import RealSense only when real cameras are enabled.
+    # from lerobot.cameras.configs import ColorMode, Cv2Rotation
+    # from lerobot.cameras.realsense.camera_realsense import RealSenseCameraConfig
+
+    # return {
+    #     "wrist_image": RealSenseCameraConfig(
+    #         serial_number_or_name=record_cfg.wrist_cam_serial,
+    #         fps=record_cfg.fps,
+    #         width=record_cfg.width,
+    #         height=record_cfg.height,
+    #         color_mode=ColorMode.RGB,
+    #         use_depth=False,
+    #         rotation=Cv2Rotation.NO_ROTATION,
+    #     ),
+    #     "exterior_image": RealSenseCameraConfig(
+    #         serial_number_or_name=record_cfg.exterior_cam_serial,
+    #         fps=record_cfg.fps,
+    #         width=record_cfg.width,
+    #         height=record_cfg.height,
+    #         color_mode=ColorMode.RGB,
+    #         use_depth=False,
+    #         rotation=Cv2Rotation.NO_ROTATION,
+    #     ),
+    # }
+
+        # Import OAK only when real cameras are enabled.
     from lerobot.cameras.configs import ColorMode, Cv2Rotation
-    from lerobot.cameras.realsense.camera_realsense import RealSenseCameraConfig
+    from lerobot.cameras.OAK.configuration_OAK import OakCameraConfig
 
     return {
-        "wrist_image": RealSenseCameraConfig(
-            serial_number_or_name=record_cfg.wrist_cam_serial,
+        "wrist_image": OakCameraConfig(
+            device_id_or_name=record_cfg.wrist_cam_serial,
             fps=record_cfg.fps,
             width=record_cfg.width,
             height=record_cfg.height,
             color_mode=ColorMode.RGB,
             use_depth=False,
             rotation=Cv2Rotation.NO_ROTATION,
-        ),
-        "exterior_image": RealSenseCameraConfig(
-            serial_number_or_name=record_cfg.exterior_cam_serial,
-            fps=record_cfg.fps,
-            width=record_cfg.width,
-            height=record_cfg.height,
-            color_mode=ColorMode.RGB,
-            use_depth=False,
-            rotation=Cv2Rotation.NO_ROTATION,
-        ),
+        ) #,
+        # "exterior_image": OakCameraConfig(
+        #     device_id_or_name=record_cfg.exterior_cam_serial,
+        #     fps=record_cfg.fps,
+        #     width=record_cfg.width,
+        #     height=record_cfg.height,
+        #     color_mode=ColorMode.RGB,
+        #     use_depth=False,
+        #     rotation=Cv2Rotation.NO_ROTATION,
+        # ),
     }
 
 
 def handle_incomplete_dataset(dataset_path) -> bool:
     if dataset_path.exists():
         print(f"====== [WARNING] Detected an incomplete dataset folder: {dataset_path} ======")
-        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+        flush_stdin()
         ans = input("Do you want to delete it? (y/n): ").strip().lower()
         if ans == "y":
             print(f"====== [TRASH] Moving folder to trash: {dataset_path} ======")
@@ -261,7 +302,7 @@ def finalize_dataset_safely(dataset: LeRobotDataset | None) -> None:
 
 def wait_for_enter(prompt: str) -> None:
     while True:
-        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+        flush_stdin()
         user_input = input(prompt)
         if user_input == "":
             return

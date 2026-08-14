@@ -7,8 +7,8 @@ record:
   fps: 15 # dataset and camera frame rate
 
   robot:
-    ip: &ip "192.168.201.11" # robot_ip
-    use_gripper: &use_gripper True
+    ip: &ip "172.17.0.2" # robot_ip
+    use_gripper: &use_gripper False
     init_gripper: &init_gripper True # If False, skip DH gripper init_state/init_feedback
     close_threshold: 0.7 # threshold to determine gripper open/close
     gripper_bin_threshold: 0.98 # threshold to determine gripper is closed
@@ -67,7 +67,7 @@ record:
 
   cameras:
     enabled: True # if False, do not open RealSense hardware and use fixed dummy images
-    wrist_cam_serial: "944622073455" # wrist camera serial number
+    wrist_cam_serial: "1944301051EED71200" # wrist camera serial number
     exterior_cam_serial: "348522072391" # exterior camera serial number
     width: 640 # camera and dummy-frame width; common values: 640, 424
     height: 480 # camera and dummy-frame height; common values: 480, 360, 240

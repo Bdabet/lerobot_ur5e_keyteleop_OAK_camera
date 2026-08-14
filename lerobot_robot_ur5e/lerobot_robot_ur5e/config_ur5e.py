@@ -10,7 +10,7 @@ class UR5eConfig(RobotConfig):
     use_gripper: bool = True
     init_gripper: bool = True
     gripper_reverse: bool = False
-    robot_ip: str = "192.168.1.184"
+    robot_ip: str = "172.17.0.3"
     gripper_port: str = "/dev/ur5e_left_gripper"
     gripper_force: int = 70
     gripper_speed: int = 60
