@@ -1,4 +1,5 @@
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig
+from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig
 import yaml
 from pathlib import Path
 from typing import Dict, Any
@@ -17,6 +18,22 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.utils import hw_to_dataset_features
 from lerobot.utils.control_utils import sanity_check_dataset_robot_compatibility
 import logging
+
+import sys
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import termios
+
+
+def flush_stdin() -> None:
+    """Discard any pending keystrokes before reading fresh input."""
+    if sys.platform == "win32":
+        while msvcrt.kbhit():
+            msvcrt.getch()
+    else:
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
 
 import sys
 
@@ -196,10 +213,16 @@ def make_camera_configs(record_cfg: RecordConfig) -> dict:
     # }
 
         # Import OAK only when real cameras are enabled.
+
+
+    # Import OAK only when real cameras are enabled.
     from lerobot.cameras.configs import ColorMode, Cv2Rotation
+    from lerobot.cameras.OAK.configuration_OAK import OakCameraConfig
     from lerobot.cameras.OAK.configuration_OAK import OakCameraConfig
 
     return {
+        "wrist_image": OakCameraConfig(
+            device_id_or_name=record_cfg.wrist_cam_serial,
         "wrist_image": OakCameraConfig(
             device_id_or_name=record_cfg.wrist_cam_serial,
             fps=record_cfg.fps,
@@ -218,12 +241,25 @@ def make_camera_configs(record_cfg: RecordConfig) -> dict:
         #     use_depth=False,
         #     rotation=Cv2Rotation.NO_ROTATION,
         # ),
+        ) 
+        # second camera
+        # ,
+        # "exterior_image": OakCameraConfig(
+        #     device_id_or_name=record_cfg.exterior_cam_serial,
+        #     fps=record_cfg.fps,
+        #     width=record_cfg.width,
+        #     height=record_cfg.height,
+        #     color_mode=ColorMode.RGB,
+        #     use_depth=False,
+        #     rotation=Cv2Rotation.NO_ROTATION,
+        # ),
     }
 
 
 def handle_incomplete_dataset(dataset_path) -> bool:
     if dataset_path.exists():
         print(f"====== [WARNING] Detected an incomplete dataset folder: {dataset_path} ======")
+        flush_stdin()
         flush_stdin()
         ans = input("Do you want to delete it? (y/n): ").strip().lower()
         if ans == "y":
@@ -302,6 +338,7 @@ def finalize_dataset_safely(dataset: LeRobotDataset | None) -> None:
 
 def wait_for_enter(prompt: str) -> None:
     while True:
+        flush_stdin()
         flush_stdin()
         user_input = input(prompt)
         if user_input == "":
@@ -596,3 +633,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+>>>>>>> origin/main

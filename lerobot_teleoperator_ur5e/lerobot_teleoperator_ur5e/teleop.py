@@ -22,6 +22,7 @@ from queue import Queue
 from typing import Any
 
 import numpy as np
+import pygame
 from scipy.spatial.transform import Rotation as R
 
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
@@ -46,6 +47,13 @@ except Exception as e:
 
 
 ACTION_KEYS = ("delta_x", "delta_y", "delta_z", "delta_rx", "delta_ry", "delta_rz")
+
+# ---- joystick button/axis indices
+JOYSTICK_AXIS_Y = 0          # left stick left/right  -> delta_y
+JOYSTICK_AXIS_X = 1          # left stick up/down (inverted) -> delta_x
+JOYSTICK_BUTTON_R1 = 10      # right bumper -> +delta_z
+JOYSTICK_BUTTON_L1 = 9       # left bumper  -> -delta_z
+JOYSTICK_AXIS_DEADZONE = 0.1
 
 
 class KeyboardTeleop(Teleoperator):
@@ -157,7 +165,16 @@ class KeyboardTeleop(Teleoperator):
 
 class UR5eTeleop(KeyboardTeleop):
     """
-    Teleop class to use keyboard inputs for end effector control.
+    Teleop class that uses:
+      - a game controller (pygame joystick) for x/y/z translation
+      - the keyboard for rotation and the gripper
+
+    Joystick loading and mapping is taken directly from RobotController:
+      - left stick axis 0 (Y_axis)          -> delta_y
+      - left stick axis 1, inverted (X_axis) -> delta_x
+      - R1 (button 10)                       -> +delta_z
+      - L1 (button 9)                        -> -delta_z
+
     Designed to be used with the `So100FollowerEndEffector` robot.
     """
 
@@ -188,6 +205,10 @@ class UR5eTeleop(KeyboardTeleop):
         self.robot = None
         self.gripper_action = self._get_initial_gripper_action()
 
+        # ---- joystick state (loading/mapping ported from RobotController) ----
+        self.joystick_id = getattr(config, "joystick_id", 0)
+        self.joystick = None
+
     def set_robot(self, robot) -> None:
         self.robot = robot
 
@@ -200,6 +221,41 @@ class UR5eTeleop(KeyboardTeleop):
             if value in {"0", "1"}:
                 return float(value)
             print("Invalid input. Please enter 0 or 1.")
+
+    # ======= joystick connect / disconnect  =======
+
+    def _connect_joystick(self) -> None:
+        pygame.init()
+        pygame.joystick.init()
+
+        if pygame.joystick.get_count() == 0:
+            logging.warning(
+                "UR5eTeleop: no controller detected. x/y/z translation will stay at 0 "
+                "until a controller is connected."
+            )
+            self.joystick = None
+            return
+
+        self.joystick = pygame.joystick.Joystick(self.joystick_id)
+        self.joystick.init()
+        logging.info(f"UR5eTeleop: joystick '{self.joystick.get_name()}' connected.")
+
+    def _disconnect_joystick(self) -> None:
+        if self.joystick is not None:
+            self.joystick.quit()
+            self.joystick = None
+        pygame.joystick.quit()
+        pygame.quit()
+
+    def connect(self) -> None:
+        # keyboard listener (rotation + gripper)
+        super().connect()
+        # joystick (x/y/z translation)
+        self._connect_joystick()
+
+    def disconnect(self) -> None:
+        super().disconnect()
+        self._disconnect_joystick()
 
     def _toggle_step_size(self) -> None:
         if self.alternate_step_size is None or self.alternate_rot_step_size is None:
@@ -343,6 +399,42 @@ class UR5eTeleop(KeyboardTeleop):
             "delta_rz": float(delta_euler_tcp[2]),
         }
 
+    # ======= joystick polling  =======
+
+    def _get_joystick_translation(self) -> tuple[float, float, float]:
+        """
+        Poll the joystick for x/y/z translation, using the same axis/button
+        indices and deadzone as RobotController:
+            Y_axis (axis 0)          -> delta_y
+            X_axis (axis 1, negated) -> delta_x
+            R1 (button 10)           -> +delta_z
+            L1 (button 9)            -> -delta_z
+        """
+        delta_x, delta_y, delta_z = 0.0, 0.0, 0.0
+
+        if self.joystick is None:
+            return delta_x, delta_y, delta_z
+
+        pygame.event.pump()
+
+        y_axis = self.joystick.get_axis(JOYSTICK_AXIS_Y)
+        x_axis = -self.joystick.get_axis(JOYSTICK_AXIS_X)
+        r1_button = self.joystick.get_button(JOYSTICK_BUTTON_R1)
+        l1_button = self.joystick.get_button(JOYSTICK_BUTTON_L1)
+
+        if abs(y_axis) > JOYSTICK_AXIS_DEADZONE:
+            delta_y = y_axis * self.step_size
+
+        if abs(x_axis) > JOYSTICK_AXIS_DEADZONE:
+            delta_x = x_axis * self.step_size
+
+        if r1_button:
+            delta_z = self.step_size
+        elif l1_button:
+            delta_z = -self.step_size
+
+        return delta_x, delta_y, delta_z
+
     def get_action(self) -> dict[str, Any]:
         if not self.is_connected:
             raise DeviceNotConnectedError(
@@ -357,13 +449,14 @@ class UR5eTeleop(KeyboardTeleop):
 
         action_values = {axis: 0.0 for axis in ACTION_KEYS}
 
+        # ---- x/y/z translation now comes from the joystick ----
+        delta_x, delta_y, delta_z = self._get_joystick_translation()
+        action_values["delta_x"] = delta_x
+        action_values["delta_y"] = delta_y
+        action_values["delta_z"] = delta_z
+
+        # ---- rotation stays on the keyboard ----
         key_mapping = {
-            keyboard.KeyCode.from_char("s"): ("delta_x", 1.0, self.step_size),
-            keyboard.KeyCode.from_char("w"): ("delta_x", -1.0, self.step_size),
-            keyboard.KeyCode.from_char("d"): ("delta_y", 1.0, self.step_size),
-            keyboard.KeyCode.from_char("a"): ("delta_y", -1.0, self.step_size),
-            keyboard.KeyCode.from_char("q"): ("delta_z", 1.0, self.step_size),
-            keyboard.KeyCode.from_char("e"): ("delta_z", -1.0, self.step_size),
             keyboard.KeyCode.from_char("r"): ("delta_rx", 1.0, self.rot_step_size),
             keyboard.KeyCode.from_char("t"): ("delta_rx", -1.0, self.rot_step_size),
             keyboard.KeyCode.from_char("g"): ("delta_ry", 1.0, self.rot_step_size),
@@ -372,8 +465,7 @@ class UR5eTeleop(KeyboardTeleop):
             keyboard.KeyCode.from_char("v"): ("delta_rz", -1.0, self.rot_step_size),
         }
 
-        # Generate action from sustained key states. This allows held keys and
-        # multi-axis combinations such as forward + left.
+        # Generate action from sustained key states (rotation + gripper only).
         for key, val in self.current_pressed.items():
             if key in key_mapping and val:
                 axis, sign, step = key_mapping[key]
@@ -387,5 +479,8 @@ class UR5eTeleop(KeyboardTeleop):
 
         if self.config.use_gripper:
             action_dict["gripper_position"] = self.gripper_action
+
+        # debug 
+        print(f"action_dict: {action_dict}")
 
         return action_dict
