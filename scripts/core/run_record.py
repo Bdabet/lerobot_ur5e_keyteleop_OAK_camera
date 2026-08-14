@@ -170,32 +170,9 @@ def make_camera_configs(record_cfg: RecordConfig) -> dict:
             "Both camera serial numbers are required when cameras.enabled is true."
         )
 
-    # # Import RealSense only when real cameras are enabled.
-    # from lerobot.cameras.configs import ColorMode, Cv2Rotation
-    # from lerobot.cameras.realsense.camera_realsense import RealSenseCameraConfig
 
-    # return {
-    #     "wrist_image": RealSenseCameraConfig(
-    #         serial_number_or_name=record_cfg.wrist_cam_serial,
-    #         fps=record_cfg.fps,
-    #         width=record_cfg.width,
-    #         height=record_cfg.height,
-    #         color_mode=ColorMode.RGB,
-    #         use_depth=False,
-    #         rotation=Cv2Rotation.NO_ROTATION,
-    #     ),
-    #     "exterior_image": RealSenseCameraConfig(
-    #         serial_number_or_name=record_cfg.exterior_cam_serial,
-    #         fps=record_cfg.fps,
-    #         width=record_cfg.width,
-    #         height=record_cfg.height,
-    #         color_mode=ColorMode.RGB,
-    #         use_depth=False,
-    #         rotation=Cv2Rotation.NO_ROTATION,
-    #     ),
-    # }
 
-        # Import OAK only when real cameras are enabled.
+    # Import OAK only when real cameras are enabled.
     from lerobot.cameras.configs import ColorMode, Cv2Rotation
     from lerobot.cameras.OAK.configuration_OAK import OakCameraConfig
 
@@ -208,7 +185,9 @@ def make_camera_configs(record_cfg: RecordConfig) -> dict:
             color_mode=ColorMode.RGB,
             use_depth=False,
             rotation=Cv2Rotation.NO_ROTATION,
-        ) #,
+        ) 
+        # second camera
+        # ,
         # "exterior_image": OakCameraConfig(
         #     device_id_or_name=record_cfg.exterior_cam_serial,
         #     fps=record_cfg.fps,
