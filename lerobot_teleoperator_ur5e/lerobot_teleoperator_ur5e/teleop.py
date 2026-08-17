@@ -51,8 +51,8 @@ ACTION_KEYS = ("delta_x", "delta_y", "delta_z", "delta_rx", "delta_ry", "delta_r
 # ---- joystick button/axis indices
 JOYSTICK_AXIS_Y = 0          # left stick left/right  -> delta_y
 JOYSTICK_AXIS_X = 1          # left stick up/down (inverted) -> delta_x
-JOYSTICK_BUTTON_R1 = 10      # right bumper -> +delta_z
-JOYSTICK_BUTTON_L1 = 9       # left bumper  -> -delta_z
+JOYSTICK_BUTTON_R1 = 5      # right bumper -> +delta_z
+JOYSTICK_BUTTON_L1 = 4       # left bumper  -> -delta_z
 JOYSTICK_AXIS_DEADZONE = 0.1
 
 
@@ -172,8 +172,8 @@ class UR5eTeleop(KeyboardTeleop):
     Joystick loading and mapping is taken directly from RobotController:
       - left stick axis 0 (Y_axis)          -> delta_y
       - left stick axis 1, inverted (X_axis) -> delta_x
-      - R1 (button 10)                       -> +delta_z
-      - L1 (button 9)                        -> -delta_z
+      - R1 (button 5)                       -> +delta_z
+      - L1 (button 4)                        -> -delta_z
 
     Designed to be used with the `So100FollowerEndEffector` robot.
     """
@@ -429,10 +429,13 @@ class UR5eTeleop(KeyboardTeleop):
             delta_x = x_axis * self.step_size
 
         if r1_button:
+            print("R1 pressed")
             delta_z = self.step_size
+            print(f"delta_z: {delta_z}")
         elif l1_button:
             delta_z = -self.step_size
 
+        print(f"delta_x: {delta_x}, delta_y: {delta_y}, delta_z: {delta_z}")
         return delta_x, delta_y, delta_z
 
     def get_action(self) -> dict[str, Any]:
@@ -451,9 +454,11 @@ class UR5eTeleop(KeyboardTeleop):
 
         # ---- x/y/z translation now comes from the joystick ----
         delta_x, delta_y, delta_z = self._get_joystick_translation()
+        print(f"Joystick translation: delta_x={delta_x}, delta_y={delta_y}, delta_z={delta_z}")
         action_values["delta_x"] = delta_x
         action_values["delta_y"] = delta_y
         action_values["delta_z"] = delta_z
+        print(action_values)
 
         # ---- rotation stays on the keyboard ----
         key_mapping = {

@@ -223,8 +223,6 @@ def make_camera_configs(record_cfg: RecordConfig) -> dict:
     return {
         "wrist_image": OakCameraConfig(
             device_id_or_name=record_cfg.wrist_cam_serial,
-        "wrist_image": OakCameraConfig(
-            device_id_or_name=record_cfg.wrist_cam_serial,
             fps=record_cfg.fps,
             width=record_cfg.width,
             height=record_cfg.height,
@@ -241,7 +239,6 @@ def make_camera_configs(record_cfg: RecordConfig) -> dict:
         #     use_depth=False,
         #     rotation=Cv2Rotation.NO_ROTATION,
         # ),
-        ) 
         # second camera
         # ,
         # "exterior_image": OakCameraConfig(
@@ -633,4 +630,4 @@ def main():
 
 if __name__ == "__main__":
     main()
->>>>>>> origin/main
+
