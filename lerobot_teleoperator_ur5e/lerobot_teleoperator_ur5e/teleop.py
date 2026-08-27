@@ -429,13 +429,13 @@ class UR5eTeleop(KeyboardTeleop):
             delta_x = x_axis * self.step_size
 
         if r1_button:
-            print("R1 pressed")
+            # print("R1 pressed")
             delta_z = self.step_size
-            print(f"delta_z: {delta_z}")
+            # print(f"delta_z: {delta_z}")
         elif l1_button:
             delta_z = -self.step_size
 
-        print(f"delta_x: {delta_x}, delta_y: {delta_y}, delta_z: {delta_z}")
+        # print(f"delta_x: {delta_x}, delta_y: {delta_y}, delta_z: {delta_z}")
         return delta_x, delta_y, delta_z
 
     def get_action(self) -> dict[str, Any]:
@@ -454,11 +454,11 @@ class UR5eTeleop(KeyboardTeleop):
 
         # ---- x/y/z translation now comes from the joystick ----
         delta_x, delta_y, delta_z = self._get_joystick_translation()
-        print(f"Joystick translation: delta_x={delta_x}, delta_y={delta_y}, delta_z={delta_z}")
+        # print(f"Joystick translation: delta_x={delta_x}, delta_y={delta_y}, delta_z={delta_z}")
         action_values["delta_x"] = delta_x
         action_values["delta_y"] = delta_y
         action_values["delta_z"] = delta_z
-        print(action_values)
+        # print(action_values)
 
         # ---- rotation stays on the keyboard ----
         key_mapping = {
@@ -486,6 +486,6 @@ class UR5eTeleop(KeyboardTeleop):
             action_dict["gripper_position"] = self.gripper_action
 
         # debug 
-        print(f"action_dict: {action_dict}")
+        # print(f"action_dict: {action_dict}")
 
         return action_dict
