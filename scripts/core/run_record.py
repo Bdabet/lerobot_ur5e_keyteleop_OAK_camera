@@ -229,16 +229,16 @@ def make_camera_configs(record_cfg: RecordConfig) -> dict:
             color_mode=ColorMode.RGB,
             use_depth=False,
             rotation=Cv2Rotation.NO_ROTATION,
-        ) #,
-        # "exterior_image": OakCameraConfig(
-        #     device_id_or_name=record_cfg.exterior_cam_serial,
-        #     fps=record_cfg.fps,
-        #     width=record_cfg.width,
-        #     height=record_cfg.height,
-        #     color_mode=ColorMode.RGB,
-        #     use_depth=False,
-        #     rotation=Cv2Rotation.NO_ROTATION,
-        # ),
+        ) ,
+        "exterior_image": OakCameraConfig(
+            device_id_or_name=record_cfg.exterior_cam_serial,
+            fps=record_cfg.fps,
+            width=record_cfg.width,
+            height=record_cfg.height,
+            color_mode=ColorMode.RGB,
+            use_depth=False,
+            rotation=Cv2Rotation.NO_ROTATION,
+        ),
         # second camera
         # ,
         # "exterior_image": OakCameraConfig(
