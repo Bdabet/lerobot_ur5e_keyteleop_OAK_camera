@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Dict, Any
 from scripts.utils.dataset_utils import generate_dataset_name, update_dataset_info
 from scripts.core.record_loop import record_loop
+from scripts.core.auto_pickplace import AutoPickPlaceConfig, AutoPickPlaceController
+from scripts.core.pose_registration import register_pick_place_poses
 from lerobot_robot_ur5e import UR5eConfig, UR5e
 from lerobot_teleoperator_ur5e import UR5eTeleopConfig, UR5eTeleop
 from lerobot.processor import make_default_processors
@@ -50,6 +52,30 @@ def flush_stdin() -> None:
             msvcrt.getch()
     else:
         termios.tcflush(sys.stdin, termios.TCIFLUSH)
+
+
+def check_graceful_stop_requested() -> bool:
+    """Non-blocking check for a pending Enter keypress on stdin.
+
+    Used in auto_pick_place mode to let the operator request a stop at any time
+    without blocking (unlike wait_for_enter) and without interrupting the
+    currently running episode (unlike the Esc/q keyboard control, which sets
+    exit_early too and aborts immediately). The keystroke is buffered by the OS
+    until read, so it's detected here even if pressed mid-episode.
+    """
+    requested = False
+    if sys.platform == "win32":
+        while msvcrt.kbhit():
+            if msvcrt.getch() in (b"\r", b"\n"):
+                requested = True
+    else:
+        import select
+
+        while select.select([sys.stdin], [], [], 0)[0]:
+            if sys.stdin.read(1) in ("\r", "\n"):
+                requested = True
+    return requested
+
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -115,6 +141,25 @@ class RecordConfig:
             "init_pose_range",
             [*legacy_init_pos_range, 0.0, 0.0, 0.0],
         )
+
+        # mode: "teleop" (default, human-driven) or "auto_pick_place" (scripted)
+        self.mode: str = cfg.get("mode", "teleop")
+        self.auto_pick_place: AutoPickPlaceConfig | None = None
+        if self.mode == "auto_pick_place":
+            self.auto_pick_place = AutoPickPlaceConfig(cfg.get("auto_pick_place", {}))
+            if self.reference_frame != "base":
+                raise ValueError(
+                    "mode 'auto_pick_place' requires robot.reference_frame: 'base' "
+                    "(pick/place poses are specified in the robot base frame)."
+                )
+            if self.control_space != "position":
+                logging.warning(
+                    "====== [WARNING] mode 'auto_pick_place' is designed for "
+                    "control_space: 'position'; got '%s'. ======",
+                    self.control_space,
+                )
+        elif self.mode != "teleop":
+            raise ValueError(f"Unsupported mode: {self.mode}")
 
         # teleop config
         self.teleop_position_step_size: float = teleop.get("position_step_size", teleop.get("step_size", 0.01))
@@ -221,15 +266,15 @@ def make_camera_configs(record_cfg: RecordConfig) -> dict:
     from lerobot.cameras.OAK.configuration_OAK import OakCameraConfig
 
     return {
-        "wrist_image": OakCameraConfig(
-            device_id_or_name=record_cfg.wrist_cam_serial,
-            fps=record_cfg.fps,
-            width=record_cfg.width,
-            height=record_cfg.height,
-            color_mode=ColorMode.RGB,
-            use_depth=False,
-            rotation=Cv2Rotation.NO_ROTATION,
-        ) ,
+        # "wrist_image": OakCameraConfig(
+        #     device_id_or_name=record_cfg.wrist_cam_serial,
+        #     fps=record_cfg.fps,
+        #     width=record_cfg.width,
+        #     height=record_cfg.height,
+        #     color_mode=ColorMode.RGB,
+        #     use_depth=False,
+        #     rotation=Cv2Rotation.NO_ROTATION,
+        # ) ,
         "exterior_image": OakCameraConfig(
             device_id_or_name=record_cfg.exterior_cam_serial,
             fps=record_cfg.fps,
@@ -251,6 +296,44 @@ def make_camera_configs(record_cfg: RecordConfig) -> dict:
         #     rotation=Cv2Rotation.NO_ROTATION,
         # ),
     }
+
+
+def build_manual_teleop(record_cfg: RecordConfig) -> UR5eTeleop:
+    """Build a plain human-driven UR5eTeleop from record_cfg's teleop settings.
+
+    Used both for mode "teleop" and during pose
+    registration in mode "auto_pick_place".
+    """
+    teleop_config = UR5eTeleopConfig(
+        use_gripper=record_cfg.use_gripper,
+        init_gripper=record_cfg.init_gripper,
+        step_size=record_cfg.teleop_step_size,
+        rot_step_size=record_cfg.teleop_rot_step_size,
+        alternate_step_size=record_cfg.teleop_alternate_step_size,
+        alternate_rot_step_size=record_cfg.teleop_alternate_rot_step_size,
+        reference_frame=record_cfg.reference_frame,
+        control_frame_euler_deg=record_cfg.control_frame_euler_deg,
+        select_vector=record_cfg.select_vector,
+    )
+    return UR5eTeleop(teleop_config)
+
+
+def build_teleop(record_cfg: RecordConfig, robot: UR5e):
+    """Build the teleop-like controller selected by record_cfg.mode.
+
+    Both branches return an object exposing the same duck-typed surface
+    record_loop/run_record expect: connect(), disconnect(), get_action(),
+    reset_step_size(), set_robot(). 
+    """
+    if record_cfg.mode == "teleop":
+        teleop = build_manual_teleop(record_cfg)
+    elif record_cfg.mode == "auto_pick_place":
+        teleop = AutoPickPlaceController(record_cfg.auto_pick_place, use_gripper=record_cfg.use_gripper)
+    else:
+        raise ValueError(f"Unsupported mode: {record_cfg.mode}")
+
+    teleop.set_robot(robot)
+    return teleop
 
 
 def handle_incomplete_dataset(dataset_path) -> bool:
@@ -376,6 +459,39 @@ def reset_to_init_pose(
     robot.reset_to_init_pose(record_cfg.init_pose, record_cfg.init_pose_range)
 
 
+def run_scene_reset(
+    record_cfg: RecordConfig,
+    robot: UR5e,
+    teleop,
+    events: dict,
+    teleop_action_processor,
+    robot_action_processor,
+    robot_observation_processor,
+) -> None:
+    """auto_pick_place mode only: pick each object back up from where the
+    just-finished episode placed it and set it down at a fresh randomized spot in
+    its own pick region, so the scene is ready for the next episode. Not recorded
+    as demonstration data (dataset=None). No-op if there's no prior episode's
+    placements to reset (e.g. before the first episode).
+    """
+    if not teleop.build_scene_reset_waypoints():
+        return
+    logging.info("====== [AUTO] Repositioning objects for the next episode... ======")
+    events["exit_early"] = False
+    record_loop(
+        robot=robot,
+        events=events,
+        fps=record_cfg.fps,
+        teleop=teleop,
+        teleop_action_processor=teleop_action_processor,
+        robot_action_processor=robot_action_processor,
+        robot_observation_processor=robot_observation_processor,
+        control_time_s=record_cfg.episode_time_sec,
+        display_data=record_cfg.display,
+    )
+    events["exit_early"] = False
+
+
 def run_record(record_cfg: RecordConfig):
     robot = None
     teleop = None
@@ -390,19 +506,8 @@ def run_record(record_cfg: RecordConfig):
     try:
         dataset_name, data_version = generate_dataset_name(record_cfg)
 
-        # Create the robot and teleoperator configurations
+        # Create the robot configuration
         camera_config = make_camera_configs(record_cfg)
-        teleop_config = UR5eTeleopConfig(
-            use_gripper=record_cfg.use_gripper,
-            init_gripper=record_cfg.init_gripper,
-            step_size=record_cfg.teleop_step_size,
-            rot_step_size=record_cfg.teleop_rot_step_size,
-            alternate_step_size=record_cfg.teleop_alternate_step_size,
-            alternate_rot_step_size=record_cfg.teleop_alternate_rot_step_size,
-            reference_frame=record_cfg.reference_frame,
-            control_frame_euler_deg=record_cfg.control_frame_euler_deg,
-            select_vector=record_cfg.select_vector,
-        )
         robot_config = UR5eConfig(
             robot_ip=record_cfg.robot_ip,
             gripper_port=record_cfg.gripper_port,
@@ -441,8 +546,7 @@ def run_record(record_cfg: RecordConfig):
         )
         # Initialize the robot and teleoperator
         robot = UR5e(robot_config)
-        teleop = UR5eTeleop(teleop_config)
-        teleop.set_robot(robot)
+        teleop = build_teleop(record_cfg, robot)
 
         # Configure the dataset features
         action_features = hw_to_dataset_features(robot.action_features, "action")
@@ -472,6 +576,8 @@ def run_record(record_cfg: RecordConfig):
 
         # Initialize the keyboard listener and rerun visualization
         _, events = init_keyboard_listener()
+        if hasattr(teleop, "set_events"):
+            teleop.set_events(events)
         init_rerun(session_name="recording")
 
         # Create processor
@@ -479,7 +585,26 @@ def run_record(record_cfg: RecordConfig):
 
         robot.connect()
         robot.reset_to_init_pose(record_cfg.init_pose, record_cfg.init_pose_range)
+
+        if record_cfg.mode == "auto_pick_place" and record_cfg.auto_pick_place.register_on_start:
+            jog_teleop = build_manual_teleop(record_cfg)
+            register_pick_place_poses(
+                record_cfg,
+                robot,
+                jog_teleop,
+                events,
+                teleop_action_processor,
+                robot_action_processor,
+                robot_observation_processor,
+            )
+
         teleop.connect()
+
+        if record_cfg.mode == "auto_pick_place":
+            logging.info(
+                "====== [INFO] auto_pick_place mode: episodes run automatically back-to-back. "
+                "Press Enter at any time to stop after the current episode finishes. ======"
+            )
 
         episode_idx = 0
         record_start_time = time_module.perf_counter()
@@ -508,11 +633,29 @@ def run_record(record_cfg: RecordConfig):
                 record_loop_time_s += time_module.perf_counter() - episode_record_start
                 record_loop_count += 1
 
+            if record_cfg.mode == "auto_pick_place" and check_graceful_stop_requested():
+                logging.info(
+                    "====== [INFO] Stop requested; finishing this episode, then stopping. ======"
+                )
+                events["stop_recording"] = True
+
             if events["rerecord_episode"]:
                 logging.info("Re-recording episode")
                 events["rerecord_episode"] = False
                 events["exit_early"] = False
                 dataset.clear_episode_buffer()
+                if record_cfg.mode == "auto_pick_place":
+                    # The discarded episode still physically moved the objects;
+                    # bring them back to their pick region before retrying.
+                    run_scene_reset(
+                        record_cfg,
+                        robot,
+                        teleop,
+                        events,
+                        teleop_action_processor,
+                        robot_action_processor,
+                        robot_observation_processor,
+                    )
                 reset_to_init_pose(
                     record_cfg,
                     robot,
@@ -537,7 +680,23 @@ def run_record(record_cfg: RecordConfig):
 
             # Reset the environment if not stopping or re-recording
             if not events["stop_recording"] and (episode_idx < record_cfg.num_episodes - 1 or events["rerecord_episode"]):
-                wait_for_enter("====== [WAIT] Press Enter to reset the robot ======")
+                if record_cfg.mode == "auto_pick_place":
+                    run_scene_reset(
+                        record_cfg,
+                        robot,
+                        teleop,
+                        events,
+                        teleop_action_processor,
+                        robot_action_processor,
+                        robot_observation_processor,
+                    )
+                    if check_graceful_stop_requested():
+                        logging.info(
+                            "====== [INFO] Stop requested; finishing setup, then stopping. ======"
+                        )
+                        events["stop_recording"] = True
+                else:
+                    wait_for_enter("====== [WAIT] Press Enter to reset the robot ======")
                 reset_to_init_pose(
                     record_cfg,
                     robot,
@@ -547,7 +706,7 @@ def run_record(record_cfg: RecordConfig):
                     robot_action_processor,
                     robot_observation_processor,
                 )
-                if not events["stop_recording"]:
+                if not events["stop_recording"] and record_cfg.mode != "auto_pick_place":
                     wait_for_enter("====== [WAIT] Press Enter to start the next episode ======")
 
             episode_idx += 1
@@ -630,4 +789,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

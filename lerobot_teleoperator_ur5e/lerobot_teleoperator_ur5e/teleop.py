@@ -53,6 +53,7 @@ JOYSTICK_AXIS_Y = 0          # left stick left/right  -> delta_y
 JOYSTICK_AXIS_X = 1          # left stick up/down (inverted) -> delta_x
 JOYSTICK_BUTTON_R1 = 5      # right bumper -> +delta_z
 JOYSTICK_BUTTON_L1 = 4       # left bumper  -> -delta_z
+X_BUTTON = 2                # X button (Xbox layout: A=0, B=1, X=2, Y=3, LB=4, RB=5)
 JOYSTICK_AXIS_DEADZONE = 0.1
 
 
@@ -208,6 +209,7 @@ class UR5eTeleop(KeyboardTeleop):
         # ---- joystick state (loading/mapping ported from RobotController) ----
         self.joystick_id = getattr(config, "joystick_id", 0)
         self.joystick = None
+        self.prev_x_button = False
 
     def set_robot(self, robot) -> None:
         self.robot = robot
@@ -401,7 +403,7 @@ class UR5eTeleop(KeyboardTeleop):
 
     # ======= joystick polling  =======
 
-    def _get_joystick_translation(self) -> tuple[float, float, float]:
+    def _get_joystick_translation(self) -> tuple[float, float, float, bool]:
         """
         Poll the joystick for x/y/z translation, using the same axis/button
         indices and deadzone as RobotController:
@@ -409,11 +411,13 @@ class UR5eTeleop(KeyboardTeleop):
             X_axis (axis 1, negated) -> delta_x
             R1 (button 10)           -> +delta_z
             L1 (button 9)            -> -delta_z
+            X button                 -> gripper open/close toggle
         """
         delta_x, delta_y, delta_z = 0.0, 0.0, 0.0
+        x_button = False
 
         if self.joystick is None:
-            return delta_x, delta_y, delta_z
+            return delta_x, delta_y, delta_z, x_button
 
         pygame.event.pump()
 
@@ -421,6 +425,7 @@ class UR5eTeleop(KeyboardTeleop):
         x_axis = -self.joystick.get_axis(JOYSTICK_AXIS_X)
         r1_button = self.joystick.get_button(JOYSTICK_BUTTON_R1)
         l1_button = self.joystick.get_button(JOYSTICK_BUTTON_L1)
+        x_button = bool(self.joystick.get_button(X_BUTTON))
 
         if abs(y_axis) > JOYSTICK_AXIS_DEADZONE:
             delta_y = y_axis * self.step_size
@@ -436,7 +441,7 @@ class UR5eTeleop(KeyboardTeleop):
             delta_z = -self.step_size
 
         # print(f"delta_x: {delta_x}, delta_y: {delta_y}, delta_z: {delta_z}")
-        return delta_x, delta_y, delta_z
+        return delta_x, delta_y, delta_z, x_button
 
     def get_action(self) -> dict[str, Any]:
         if not self.is_connected:
@@ -453,12 +458,18 @@ class UR5eTeleop(KeyboardTeleop):
         action_values = {axis: 0.0 for axis in ACTION_KEYS}
 
         # ---- x/y/z translation now comes from the joystick ----
-        delta_x, delta_y, delta_z = self._get_joystick_translation()
+        delta_x, delta_y, delta_z, x_button = self._get_joystick_translation()
         # print(f"Joystick translation: delta_x={delta_x}, delta_y={delta_y}, delta_z={delta_z}")
         action_values["delta_x"] = delta_x
         action_values["delta_y"] = delta_y
         action_values["delta_z"] = delta_z
         # print(action_values)
+
+        # ---- gripper open/close toggle on joystick X button (rising edge) ----
+        if x_button and not self.prev_x_button:
+            self.gripper_action = 1 - self.gripper_action
+            print(f"Gripper action toggled to {'OPEN' if self.gripper_action == 1 else 'CLOSE'} ({self.gripper_action})")
+        self.prev_x_button = x_button
 
         # ---- rotation stays on the keyboard ----
         key_mapping = {
@@ -477,8 +488,10 @@ class UR5eTeleop(KeyboardTeleop):
                 action_values[axis] += sign * step
             elif key == keyboard.KeyCode.from_char("o") and val:
                 self.gripper_action = 1         # O -> open, latched like conrft
+                print("Gripper action set to OPEN (1.0)")
             elif key == keyboard.KeyCode.from_char("l") and val:
                 self.gripper_action = 0         # L -> close, latched like conrft
+                print("Gripper action set to CLOSE (0.0)")
 
         action_dict = self._to_reference_delta(action_values)
 

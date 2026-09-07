@@ -2,10 +2,9 @@ import logging
 import time
 from typing import Any
 import threading
-import serial
-import crcmod
 from rtde_control import RTDEControlInterface
 from rtde_receive import RTDEReceiveInterface
+from rtde_io import RTDEIOInterface
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R
@@ -13,8 +12,8 @@ from scipy.spatial.transform import Rotation as R
 from lerobot.cameras import make_cameras_from_configs
 from lerobot.utils.errors import DeviceNotConnectedError, DeviceAlreadyConnectedError
 from lerobot.robots.robot import Robot
-from pyDHgripper import PGE
 from .config_ur5e import UR5eConfig
+from .pose_utils import sample_pose_with_jitter
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +34,9 @@ class UR5e(Robot):
         self._gripper = None
         self._initial_pose = None
         self._prev_observation = None
-        self._gripper_force = config.gripper_force
-        self._gripper_speed = config.gripper_speed
         self._gripper_position = 1.0
         self._last_gripper_position = 1.0
+        self._gripper_pos = None
         self._episode_reference_ee_pose = None
         self._force_hold_pose = None
         self._force_prev_motion_mask = [False] * 6
@@ -90,7 +88,7 @@ class UR5e(Robot):
 
         # Initialize gripper
         if self.config.use_gripper:
-            self._gripper = self._check_gripper_connection(self.config.gripper_port)
+            self._gripper = self._check_gripper_connection()
 
             # Start gripper state reader
             self._start_gripper_state_reader()
@@ -106,20 +104,13 @@ class UR5e(Robot):
         print(f"[INFO] {self.name} env initialization completed successfully.\n")
 
 
-    def _check_gripper_connection(self, port: str):
-        print("\n[GRIPPER] Initializing gripper...")
-        if self.config.init_gripper:
-            gripper = PGE(port)
-            gripper.init_feedback()
-        else:
-            gripper = PGE.__new__(PGE)
-            gripper.ser = serial.Serial(port=port, baudrate=115200)
-            gripper.crc16 = crcmod.mkCrcFun(0x18005, rev=True, initCrc=0xFFFF, xorOut=0x0000)
-            print("[GRIPPER] Skipped init_state and init_feedback by config.")
-        gripper.set_force(self._gripper_force)
-        gripper.set_vel(self._gripper_speed)
-        print(f"[GRIPPER] Force: {self._gripper_force}, speed: {self._gripper_speed}")
-        print("[GRIPPER] Gripper initialized successfully.\n")
+    def _check_gripper_connection(self):
+        print("\n[GRIPPER] Initializing suction gripper (RTDE tool digital I/O)...")
+        gripper = RTDEIOInterface(self.config.robot_ip)
+        # Start with suction deactivated (release).
+        gripper.setToolDigitalOut(1, True)
+        gripper.setToolDigitalOut(0, False)
+        print("[GRIPPER] Suction gripper initialized successfully.\n")
         return gripper
 
 
@@ -147,20 +138,24 @@ class UR5e(Robot):
         threading.Thread(target=self._read_gripper_state, daemon=True).start()
 
     def _read_gripper_state(self):
-        self._gripper.pos = None
+        self._gripper_pos = self._last_gripper_position
         while True:
             gripper_position = 0.0 if self._gripper_position < self.config.close_threshold else 1.0
             if self.config.gripper_reverse:
                 gripper_position = 1 - gripper_position
 
             if gripper_position != self._last_gripper_position:
-                self._gripper.set_pos(val=int(1000 * gripper_position), blocking=False)
+                if gripper_position == 0.0:
+                    # Closed -> activate suction (DO1 on)
+                    self._gripper.setToolDigitalOut(0, False)
+                    self._gripper.setToolDigitalOut(1, True)
+                else:
+                    # Open -> deactivate suction (DO0 on)
+                    self._gripper.setToolDigitalOut(1, False)
+                    self._gripper.setToolDigitalOut(0, True)
                 self._last_gripper_position = gripper_position
+                self._gripper_pos = gripper_position
 
-            gripper_pos = self._gripper.read_pos() / 1000.0
-            if self.config.gripper_reverse:
-                gripper_pos = 1 - gripper_pos
-            self._gripper.pos = gripper_pos
             time.sleep(0.01)
 
     @property
@@ -244,6 +239,12 @@ class UR5e(Robot):
         tcp_pose = self._arm["rtde_r"].getActualTCPPose()
         tcp_offset = self._get_current_tcp_offset()
         return self.tcp_to_ee_pose(tcp_pose, tcp_offset).tolist()
+
+    def get_tcp_force(self) -> list[float]:
+        """Live TCP wrench [fx, fy, fz, trx, try, trz] in the robot base frame, N/Nm."""
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+        return list(self._arm["rtde_r"].getActualTCPForce())
 
     def _ee_to_tcp_pose(self, ee_pose: list[float] | np.ndarray, tcp_offset: list[float] | np.ndarray) -> list[float]:
         ee_transform = self._pose_to_transform(ee_pose)
@@ -462,7 +463,7 @@ class UR5e(Robot):
             obs_dict[f"tcp_force.{axis}"] = tcp_force[i]
 
         if self.config.use_gripper:
-            gripper_pos = self._gripper.pos if self._gripper.pos is not None else self._last_gripper_position
+            gripper_pos = self._gripper_pos if self._gripper_pos is not None else self._last_gripper_position
             obs_dict["gripper_raw_position"] = gripper_pos
             obs_dict["gripper_raw_bin"] = 0 if gripper_pos <= self.config.gripper_bin_threshold else 1
             obs_dict["gripper_action_bin"] = self._last_gripper_position
@@ -523,21 +524,7 @@ class UR5e(Robot):
             )
 
     def _sample_init_pose(self, init_pose: list[float], init_pose_range: list[float]) -> list[float]:
-        if len(init_pose) != 6:
-            raise ValueError(f"init_pose must contain 6 values, got {len(init_pose)}.")
-        if len(init_pose_range) != 6:
-            raise ValueError(f"init_pose_range must contain 6 values, got {len(init_pose_range)}.")
-
-        target_pose = np.array(init_pose, dtype=float)
-        random_range = np.abs(np.array(init_pose_range, dtype=float))
-        target_pose[:3] += np.random.uniform(-random_range[:3], random_range[:3])
-
-        delta_euler_deg = np.random.uniform(-random_range[3:], random_range[3:])
-        target_euler = target_pose[3:] + np.deg2rad(delta_euler_deg)
-        # init_pose uses XYZ Euler radians; init_pose_range rotation uses degrees.
-        # UR moveL expects a rotation vector.
-        target_pose[3:] = R.from_euler("xyz", target_euler).as_rotvec()
-        return target_pose.tolist()
+        return sample_pose_with_jitter(init_pose, init_pose_range)
 
     def reset_to_init_pose(
         self,
@@ -595,6 +582,11 @@ class UR5e(Robot):
                 self.stop_force()
             self._arm["rtde_c"].disconnect()
             self._arm["rtde_r"].disconnect()
+
+        if self.config.use_gripper and self._gripper is not None:
+            # Release suction before disconnecting for safety.
+            self._gripper.setToolDigitalOut(1, False)
+            self._gripper.setToolDigitalOut(0, True)
 
         for cam in self.cameras.values():
             cam.disconnect()
