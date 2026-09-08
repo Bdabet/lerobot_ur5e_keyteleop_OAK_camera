@@ -1,12 +1,12 @@
 record:
-  repo_id: &repo_id "scylearning/extinguish_alcohol_lamp"
+  repo_id: &repo_id "tests/pick_place"
   # repo_id: &repo_id "scylearning/pick_greencube_into_trashbin" 
   # Suggested format: <hf_username>/<description>, description = task.description -> Verb_SourceObject_prep_TargetObject
   # e.g. Pick up the green cube and put it into the trash bin -> pick_greencube_into_trashbin
   user_notes: "init_pose: [0.392232, 0.104898, 0.355162, -3.14, 0.0, -1.57]; init_pose_range: [0.02, 0.02, 0.02, 0.0, 0.0, 0.0]; force_step_size: 0.04; force_fine_step_size: 0.015; force_rot_step_size: 0.05; force_fine_rot_step_size: 0.045; gripper_force: 20; gripper_speed: 100; description: 'Extinguish the alcohol lamp'" # any additional notes about the dataset
   fps: 15 # dataset and camera frame rate
 
-  mode: "teleop" # "teleop" (human-driven, default) or "auto_pick_place" (scripted, see auto_pick_place below)
+  mode: "auto_pick_place" # "teleop" (human-driven, default) or "auto_pick_place" (scripted, see auto_pick_place below)
 
   robot:
     ip: &ip "192.168.2.155" # robot_ip
@@ -19,9 +19,9 @@ record:
     gripper_force: &gripper_force 20 # gripper force command
     gripper_speed: &gripper_speed 100 # gripper speed command
     debug: False # if True, robot will not execute arm actions, but gripper can still be controlled
-    control_space: "force" # "position" or "force"; auto_pick_place needs "position" -- "force" caps motion at force_mode.force_limit below (was tuned for a delicate teleop task and throttled the scripted waypoint motion badly)
-    reference_frame: "tcp" # "base" or "tcp"; tcp_pose fields store EE/flange pose after removing UR TCP offset
-    init_pose: [0.2235, -0.4663, 0.1738, 3.123, 0.0, 0.0] # robot reset TCP pose [x, y, z, roll, pitch, yaw] in radians
+    control_space: "position" # "position" or "force"; auto_pick_place needs "position" -- "force" caps motion at force_mode.force_limit below (was tuned for a delicate teleop task and throttled the scripted waypoint motion badly)
+    reference_frame: "base" # "base" or "tcp"; tcp_pose fields store EE/flange pose after removing UR TCP offset
+    init_pose: [0.2235, -0.4663, 0.1738, 3.14159, 0.0, 1.919] # robot reset TCP pose [x, y, z, roll, pitch, yaw] in radians
     init_pose_range: [0.02, 0.02, 0.02, 0.0, 0.0, 0.0] # max random range for reset TCP pose [x, y, z, roll_deg, pitch_deg, yaw_deg]
     force_mode:
       hold_current_pose_on_idle: True # if True, hold the current actual TCP pose when no motion key is pressed
@@ -55,63 +55,80 @@ record:
     force_fine_rot_step_size: 0.045 # keyboard euler angle target delta for force control after / toggle [rx, ry, rz]
     control_frame_euler_deg: *control_frame_euler_deg
 
-  # Only used when mode: "auto_pick_place". Poses are [x, y, z, roll, pitch, yaw] in
-  # meters/radians, same convention as robot.init_pose, and MUST be in the robot base
-  # frame (robot.reference_frame must be "base" in auto_pick_place mode).
-  # *_pose_range entries are the max per-episode random jitter, same convention as
-  # robot.init_pose_range: [x, y, z, roll_deg, pitch_deg, yaw_deg].
+  # Only used when mode: "auto_pick_place". pick_region/place_region are x/y
+  # bounding boxes (meters, robot base frame; robot.reference_frame must be
+  # "base") that positions are sampled from. Orientation is never separately
+  # configured: every pick/place/loaded-object pose reuses whatever
+  # orientation the robot actually has at robot.init_pose (captured live at
+  # the start of the run), so it can never drift from it.
   #
-  # In this mode, episodes run automatically back-to-back with no manual gates:
+  # At the start of the run, the operator is asked how many objects will be
+  # used. For each one: the arm holds at robot.init_pose with the gripper
+  # turned on for object_load_hold_s seconds so the operator can hand it the
+  # object, then control switches to keyboard jog teleop so the operator can
+  # move the (suctioned) object down onto the table wherever they like -
+  # press the right arrow key to confirm placement. Wherever it's released
+  # becomes that object's fixed height/starting position for the rest of the
+  # run.
+  #
+  # After loading, episodes run automatically back-to-back with no manual
+  # gates: each episode picks every loaded object up from wherever it
+  # currently sits and places it at a fresh random spot inside place_region;
   # after each episode, the robot picks each object back up from where it was
-  # just placed and sets it down at a fresh randomized spot in its own pick
-  # region (undoing the episode, not recorded as data), then returns to
+  # just placed and sets it down at a fresh randomized spot inside pick_region
+  # (undoing the episode, not recorded as data), then returns to
   # robot.init_pose, then the next episode starts. Press Enter at any time to
   # stop gracefully after the current episode/setup step finishes.
   auto_pick_place:
-    # If true, run_record.py starts with a jog-and-capture phase: use keyboard
-    # teleop to jog to each pick pose (press right arrow to capture, then y/n to
-    # add another) and to the place pose, before episodes start. Captured poses
-    # are used immediately for this run, and logged in cfg.yaml-ready form so you
-    # can paste them into pick_pose/place_pose below and leave this false next time.
-    register_on_start: True
-    registration_time_sec: 300 # max time to jog to each pose during registration
+    object_load_hold_s: 3.0 # seconds to hold the gripper on at init_pose while the operator hands over each object
+    manual_place_time_sec: 300 # max time (s) the operator has to jog each object down and release it during loading
 
-    pick_pose: [0.4, -0.2, 0.05, 3.14, 0.0, 0.0] # target object pose to grasp
-    # pick_pose can also be a list of poses (one known object per entry). ALL of
-    # them are picked and placed within a single episode (not one chosen at
-    # random), e.g.:
-    # pick_pose:
-    #   - [0.4, -0.2, 0.05, 3.14, 0.0, 0.0]
-    #   - [0.45, -0.1, 0.05, 3.14, 0.0, 0.0]
-    pick_pose_range: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    pick_region:
+      x_range: [0.4, 0.5]
+      y_range: [-0.55, -0.06]
+    pick_min_separation: 0.05 # m, min distance enforced between objects in the pick region
     shuffle_pick_order: true # randomize which object is picked first each episode
 
-    # place_pose/place_pose_range define the goal-box region: each object's
-    # placement point is sampled fresh from within this region, and re-sampled if
-    # it lands within place_min_separation of an object already placed earlier in
-    # the same episode (so objects spread out instead of stacking).
-    place_pose: [0.3, 0.3, 0.1, 3.14, 0.0, 0.0] # goal box center pose
-    place_pose_range: [0.05, 0.05, 0.0, 0.0, 0.0, 0.0] # region objects are spread across
+    # Each episode's placement point per object is sampled fresh from within
+    # place_region, and re-sampled if it lands within place_min_separation of
+    # an object already placed earlier in the same episode (so objects spread
+    # out instead of stacking).
+    place_region:
+      x_range: [0.235, 0.3]
+      y_range: [-0.15, -0.012]
     place_min_separation: 0.05 # m, min distance enforced between placements in one episode
     place_sampling_max_attempts: 200 # placement resample attempts before giving up
 
-    approach_height: 0.10 # m, hover offset above pick/place pose for approach/retreat waypoints
-    max_step_size: 0.015 # m per tick, position streaming cap (~0.22 m/s at fps=15; raised now that servoL isn't force-limited)
+    approach_height: 0.16 # m, hover offset above pick/place pose for approach/retreat waypoints
+    max_step_size: 0.03 # m per tick, position streaming cap (~0.22 m/s at fps=15; raised now that servoL isn't force-limited)
     max_rot_step_size: 0.03 # rad per tick, orientation streaming cap
+    ramp_time_s: 0.15 # seconds to ramp the commanded step from a standstill up to max_step_size/max_rot_step_size (and back down) instead of jumping straight to full speed at each waypoint transition; smaller = snappier but rougher, larger = smoother but mushier
     position_tolerance: 0.003 # m, waypoint-reached threshold
     rotation_tolerance: 0.02 # rad, waypoint-reached threshold
     grasp_close_wait_s: 0.5 # dwell after closing gripper before lifting
     release_open_wait_s: 0.3 # dwell after opening gripper before retreating
 
-    force_stop_enabled: False # if True, stop the downward pick move early on TCP force contact instead of servoing to pick_pose depth
-    contact_force_threshold: 15.0 # N, TCP force magnitude that counts as "touched the object"
+    force_stop_enabled: True # if True, stop the downward pick/place move early on TCP force contact instead of servoing to the assumed depth
+    contact_force_threshold: 10.0 # N, TCP force magnitude that counts as "touched the object"
+    force_stop_approach_step_size: 0.005 # m per tick, slower position cap used only while descending into pick/place so contact is caught with little overshoot (avoids tripping the arm's own protective stop)
+    force_stop_clearance_height: 0.02 # m, retreat straight up this far from wherever contact was actually detected, right after grasp/release, before continuing to the full lift/retreat waypoint
+
+    # Human-like imperfections (all disabled/no-op by default; enable to make
+    # scripted demonstrations look less mechanically perfect).
+    overshoot_enabled: True # if True, reach slightly past pick/place before correcting back
+    pick_overshoot_distance: 0.03 # m, max random horizontal overshoot at the pick point
+    place_overshoot_distance: 0.02 # m, max random horizontal overshoot at the place point
+    trajectory_curve_enabled: False # if True, bow the lift->pre_place transfer path instead of a straight line
+    trajectory_bow_range: 0.05 # m, max random perpendicular bow offset applied to the transfer path
+    trajectory_waypoints: 3 # number of intermediate waypoints sampled along the bowed transfer path
 
   task:
-    description: "Extinguish the alcohol lamp" # task description
-    num_episodes: 120 # number of episodes to record
+    description: "put the sharpener next to the blue box" # task description
+    num_episodes: 30 # number of episodes to record
     display: True # Whether to display the data during recording
-    resume: False
-    resume_dataset: scylearning/extinguish_alcohol_lamp_20260801_v01 # dataset to resume from if resume is True
+    resume: True
+    # resume_dataset: scylearning/extinguish_alcohol_lamp_20260801_v01 # dataset to resume from if resume is True
+    resume_dataset: tests/pick_place_20260908_v03
 
   time:
     episode_time_sec: 600 # max time per episode in seconds
@@ -123,7 +140,7 @@ record:
     wrist_cam_serial: "1944301051EED71200" # wrist camera serial number
     exterior_cam_serial: "19443010019DD81200" # exterior camera serial number
     width: 640 # camera and dummy-frame width; common values: 640, 424
-    height: 480 # camera and dummy-frame height; common values: 480, 360, 240
+    height: 360 # camera and dummy-frame height; kept at 16:9 (OAK sensor default resolution) to avoid center-cropping the preview; common values: 360, 720
     dummy_value: 0 # dummy RGB image intensity in [0, 255]
 
   storage:

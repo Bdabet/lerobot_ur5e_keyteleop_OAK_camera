@@ -31,11 +31,15 @@ class UR5eConfig(RobotConfig):
     control_frame_euler_deg: list = field(
         default_factory=lambda: [0.0, 0.0, 0.0]
     )
-    speed: float = 0.5
+    speed: float = 0.8
     acceleration: float = 0.5
     servo_time: float = 0.1
     lookahead_time: float = 0.1
     gain: int = 300
+    max_pos_speed: float = 0.25
+    max_rot_speed: float = 0.5
+    force_stop_limit: float | None = None
+    force_stop_deceleration: float = 5.0
     payload_mass: float = 1.601
     payload_cog: list = field(default_factory=lambda: [0.011, -0.002, 0.052])
     init_pose: list = field(default_factory=lambda: [0.614137, -0.074413, 0.122977, 3.106029, -0.009024, -1.636309])
