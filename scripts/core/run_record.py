@@ -6,7 +6,7 @@ from typing import Dict, Any
 from scripts.utils.dataset_utils import generate_dataset_name, update_dataset_info
 from scripts.core.record_loop import record_loop
 from scripts.core.auto_pickplace import AutoPickPlaceConfig, AutoPickPlaceController
-from scripts.core.pose_registration import register_pick_place_poses
+from scripts.core.object_loading import load_objects_into_regions
 from lerobot_robot_ur5e import UR5eConfig, UR5e
 from lerobot_teleoperator_ur5e import UR5eTeleopConfig, UR5eTeleop
 from lerobot.processor import make_default_processors
@@ -266,15 +266,15 @@ def make_camera_configs(record_cfg: RecordConfig) -> dict:
     from lerobot.cameras.OAK.configuration_OAK import OakCameraConfig
 
     return {
-        # "wrist_image": OakCameraConfig(
-        #     device_id_or_name=record_cfg.wrist_cam_serial,
-        #     fps=record_cfg.fps,
-        #     width=record_cfg.width,
-        #     height=record_cfg.height,
-        #     color_mode=ColorMode.RGB,
-        #     use_depth=False,
-        #     rotation=Cv2Rotation.NO_ROTATION,
-        # ) ,
+        "wrist_image": OakCameraConfig(
+            device_id_or_name=record_cfg.wrist_cam_serial,
+            fps=record_cfg.fps,
+            width=record_cfg.width,
+            height=record_cfg.height,
+            color_mode=ColorMode.RGB,
+            use_depth=False,
+            rotation=Cv2Rotation.NO_ROTATION,
+        ) ,
         "exterior_image": OakCameraConfig(
             device_id_or_name=record_cfg.exterior_cam_serial,
             fps=record_cfg.fps,
@@ -586,19 +586,27 @@ def run_record(record_cfg: RecordConfig):
         robot.connect()
         robot.reset_to_init_pose(record_cfg.init_pose, record_cfg.init_pose_range)
 
-        if record_cfg.mode == "auto_pick_place" and record_cfg.auto_pick_place.register_on_start:
+        teleop.connect()
+
+        if record_cfg.mode == "auto_pick_place":
+            # Every pick/place/loaded-object pose reuses this exact
+            # orientation, so it can never drift from robot.init_pose's own
+            # configured rotation (as a separately-configured region rotation
+            # value could).
+            teleop.set_canonical_orientation_from_current_pose()
             jog_teleop = build_manual_teleop(record_cfg)
-            register_pick_place_poses(
+            load_objects_into_regions(
                 record_cfg,
                 robot,
+                teleop,
                 jog_teleop,
                 events,
                 teleop_action_processor,
                 robot_action_processor,
                 robot_observation_processor,
             )
-
-        teleop.connect()
+            
+            robot.reset_to_init_pose(record_cfg.init_pose, record_cfg.init_pose_range)
 
         if record_cfg.mode == "auto_pick_place":
             logging.info(
