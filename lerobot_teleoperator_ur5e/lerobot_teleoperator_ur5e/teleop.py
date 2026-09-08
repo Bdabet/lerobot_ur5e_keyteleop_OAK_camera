@@ -216,7 +216,7 @@ class UR5eTeleop(KeyboardTeleop):
 
     def _get_initial_gripper_action(self) -> float:
         if self.config.init_gripper:
-            return 1.0
+            return 0.0
 
         while True:
             value = input("Please enter the initial gripper action (0 or 1): ").strip()
@@ -468,7 +468,7 @@ class UR5eTeleop(KeyboardTeleop):
         # ---- gripper open/close toggle on joystick X button (rising edge) ----
         if x_button and not self.prev_x_button:
             self.gripper_action = 1 - self.gripper_action
-            print(f"Gripper action toggled to {'OPEN' if self.gripper_action == 1 else 'CLOSE'} ({self.gripper_action})")
+            print(f"Gripper action toggled to {'CLOSE' if self.gripper_action == 1 else 'OPEN'} ({self.gripper_action})")
         self.prev_x_button = x_button
 
         # ---- rotation stays on the keyboard ----
@@ -487,11 +487,11 @@ class UR5eTeleop(KeyboardTeleop):
                 axis, sign, step = key_mapping[key]
                 action_values[axis] += sign * step
             elif key == keyboard.KeyCode.from_char("o") and val:
-                self.gripper_action = 1         # O -> open, latched like conrft
-                print("Gripper action set to OPEN (1.0)")
+                self.gripper_action = 0         # O -> open, latched like conrft
+                print("Gripper action set to OPEN (0.0)")
             elif key == keyboard.KeyCode.from_char("l") and val:
-                self.gripper_action = 0         # L -> close, latched like conrft
-                print("Gripper action set to CLOSE (0.0)")
+                self.gripper_action = 1         # L -> close, latched like conrft
+                print("Gripper action set to CLOSE (1.0)")
 
         action_dict = self._to_reference_delta(action_values)
 
