@@ -14,11 +14,18 @@ from lerobot.utils.errors import DeviceNotConnectedError, DeviceAlreadyConnected
 from lerobot.robots.robot import Robot
 from .config_ur5e import UR5eConfig
 from .pose_utils import sample_pose_with_jitter
+from .pose_trajectory_interpolator import PoseTrajectoryInterpolator
 
 logger = logging.getLogger(__name__)
 
 PAYLOAD_SETTLE_TIME_S = 0.25
 FT_ZERO_SETTLE_TIME_S = 0.50
+# If the interpolator's commanded pose drifts from the robot's actual pose by more
+# than this, the robot was moved through a path that bypassed the interpolator
+# (e.g. moveL() in reset_to_init_pose, or a protective-stop recovery) and it must
+# be resynced, or the next servoL target will be stale and cause a fast snap.
+POSE_INTERP_RESYNC_POS_M = 0.05
+POSE_INTERP_RESYNC_ROT_RAD = 0.1
 
 class UR5e(Robot):
     config_class = UR5eConfig
@@ -34,12 +41,13 @@ class UR5e(Robot):
         self._gripper = None
         self._initial_pose = None
         self._prev_observation = None
-        self._gripper_position = 1.0
-        self._last_gripper_position = 1.0
+        self._gripper_position = 0.0
+        self._last_gripper_position = 0.0
         self._gripper_pos = None
         self._episode_reference_ee_pose = None
         self._force_hold_pose = None
         self._force_prev_motion_mask = [False] * 6
+        self._pose_interp = None
         self.control_frame_euler_deg = self._validate_control_frame_euler()
         self.control_to_base_rotation = R.from_euler(
             "xyz", self.control_frame_euler_deg, degrees=True
@@ -81,6 +89,12 @@ class UR5e(Robot):
         # Connect to robot
         self._arm['rtde_r'], self._arm['rtde_c'] = self._check_ur5e_connection(self.config.robot_ip)
 
+        if self.config.control_space == "position":
+            self._pose_interp = PoseTrajectoryInterpolator(
+                times=[time.monotonic()],
+                poses=[self._arm["rtde_r"].getActualTCPPose()],
+            )
+
         if self.config.control_space == "force":
             self._arm["rtde_c"].forceModeSetGainScaling(self.config.gain_scale)
 
@@ -107,9 +121,10 @@ class UR5e(Robot):
     def _check_gripper_connection(self):
         print("\n[GRIPPER] Initializing suction gripper (RTDE tool digital I/O)...")
         gripper = RTDEIOInterface(self.config.robot_ip)
-        # Start with suction deactivated (release).
-        gripper.setToolDigitalOut(1, True)
-        gripper.setToolDigitalOut(0, False)
+        # Start with suction deactivated (release), matching the "Open" pin
+        # pattern used in _read_gripper_state (DO1 off, DO0 on).
+        gripper.setToolDigitalOut(1, False)
+        gripper.setToolDigitalOut(0, True)
         print("[GRIPPER] Suction gripper initialized successfully.\n")
         return gripper
 
@@ -145,7 +160,7 @@ class UR5e(Robot):
                 gripper_position = 1 - gripper_position
 
             if gripper_position != self._last_gripper_position:
-                if gripper_position == 0.0:
+                if gripper_position == 1.0:
                     # Closed -> activate suction (DO1 on)
                     self._gripper.setToolDigitalOut(0, False)
                     self._gripper.setToolDigitalOut(1, True)
@@ -348,6 +363,26 @@ class UR5e(Robot):
 
         return self._calculate_force(target_pose, curr_pose, curr_vel)
 
+    def _resync_pose_interp_if_stale(self, t_now: float) -> None:
+        """Reseed the pose interpolator from the robot's actual current pose if it
+        has drifted too far from what the interpolator last commanded. This
+        happens whenever the robot moves through a path that bypasses the
+        interpolator (moveL in reset_to_init_pose, a protective-stop recovery,
+        free-drive, etc.) and prevents the next servoL call from snapping back
+        toward a stale commanded pose."""
+        actual_pose = np.array(self._arm["rtde_r"].getActualTCPPose(), dtype=float)
+        if self._pose_interp is None:
+            self._pose_interp = PoseTrajectoryInterpolator(times=[t_now], poses=[actual_pose])
+            return
+
+        commanded_pose = self._pose_interp(t_now)
+        pos_drift = float(np.linalg.norm(actual_pose[:3] - commanded_pose[:3]))
+        rot_drift = float(
+            (R.from_rotvec(actual_pose[3:]) * R.from_rotvec(commanded_pose[3:]).inv()).magnitude()
+        )
+        if pos_drift > POSE_INTERP_RESYNC_POS_M or rot_drift > POSE_INTERP_RESYNC_ROT_RAD:
+            self._pose_interp = PoseTrajectoryInterpolator(times=[t_now], poses=[actual_pose])
+
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
@@ -370,17 +405,44 @@ class UR5e(Robot):
                         self.config.force_limit,
                     )
                 elif self.config.control_space == "position":
-                    target_pose = self._target_pose_from_action(action)
+                    t_now = time.monotonic()
+                    self._resync_pose_interp_if_stale(t_now)
 
-                    t_start = self._arm["rtde_c"].initPeriod()
-                    self._arm["rtde_c"].servoL(
-                        target_pose,
-                        self.config.speed,
-                        self.config.acceleration,
-                        self.config.servo_time,
-                        self.config.lookahead_time,
-                        self.config.gain,
-                    )
+                    force_stop_limit = self.config.force_stop_limit
+                    force_triggered = False
+                    if force_stop_limit is not None:
+                        tcp_force = self.get_tcp_force()
+                        force_magnitude = float(np.linalg.norm(tcp_force[:3]))
+                        force_triggered = force_magnitude > force_stop_limit
+
+                    if force_triggered:
+                        t_start = self._arm["rtde_c"].initPeriod()
+                        self._arm["rtde_c"].stopL(self.config.force_stop_deceleration)
+                        current_pose = self._arm["rtde_r"].getActualTCPPose()
+                        self._pose_interp = PoseTrajectoryInterpolator(
+                            times=[t_now], poses=[current_pose]
+                        )
+                    else:
+                        target_pose = self._target_pose_from_action(action)
+
+                        self._pose_interp = self._pose_interp.drive_to_waypoint(
+                            pose=target_pose,
+                            time=t_now + self.config.servo_time,
+                            curr_time=t_now,
+                            max_pos_speed=self.config.max_pos_speed,
+                            max_rot_speed=self.config.max_rot_speed,
+                        )
+                        pose_command = self._pose_interp(t_now).tolist()
+
+                        t_start = self._arm["rtde_c"].initPeriod()
+                        self._arm["rtde_c"].servoL(
+                            pose_command,
+                            self.config.speed,
+                            self.config.acceleration,
+                            self.config.servo_time,
+                            self.config.lookahead_time,
+                            self.config.gain,
+                        )
         else:
             raise ValueError(f"Keyboard UR5e action must contain {', '.join(action_keys)}.")
 
